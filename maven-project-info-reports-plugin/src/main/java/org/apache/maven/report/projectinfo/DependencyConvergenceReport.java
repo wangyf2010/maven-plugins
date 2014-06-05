@@ -19,31 +19,45 @@ package org.apache.maven.report.projectinfo;
  * under the License.
  */
 
-import org.apache.maven.doxia.sink.Sink;
-import org.apache.maven.doxia.sink.SinkEventAttributeSet;
-import org.apache.maven.doxia.sink.SinkEventAttributes;
-import org.apache.maven.model.Dependency;
-import org.apache.maven.plugins.annotations.Mojo;
-import org.apache.maven.plugins.annotations.Parameter;
-import org.apache.maven.project.MavenProject;
-import org.apache.maven.reporting.MavenReportException;
-import org.codehaus.plexus.util.StringUtils;
-
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.TreeMap;
+
+import org.apache.maven.artifact.Artifact;
+import org.apache.maven.artifact.factory.ArtifactFactory;
+import org.apache.maven.artifact.metadata.ArtifactMetadataSource;
+import org.apache.maven.artifact.resolver.ArtifactCollector;
+import org.apache.maven.artifact.resolver.filter.ArtifactFilter;
+import org.apache.maven.doxia.sink.Sink;
+import org.apache.maven.doxia.sink.SinkEventAttributeSet;
+import org.apache.maven.doxia.sink.SinkEventAttributes;
+import org.apache.maven.model.Dependency;
+import org.apache.maven.plugins.annotations.Component;
+import org.apache.maven.plugins.annotations.Mojo;
+import org.apache.maven.plugins.annotations.Parameter;
+import org.apache.maven.project.MavenProject;
+import org.apache.maven.report.projectinfo.dependencies.DependencyVersionMap;
+import org.apache.maven.reporting.MavenReportException;
+import org.apache.maven.shared.dependency.tree.DependencyNode;
+import org.apache.maven.shared.dependency.tree.DependencyTreeBuilder;
+import org.apache.maven.shared.dependency.tree.DependencyTreeBuilderException;
+import org.codehaus.plexus.util.StringUtils;
 
 /**
  * Generates the Dependency Convergence report for reactor builds.
- *
+ * 
  * @author <a href="mailto:joakim@erdfelt.com">Joakim Erdfelt</a>
  * @author <a href="mailto:vincent.siveton@gmail.com">Vincent Siveton </a>
- * @version $Id$
+ * @author <a href="mailto:wangyf2010@gmail.com">Simon Wang </a>
+ * @version $Id: DependencyConvergenceReport.java 1367255 2012-07-30 20:01:21Z hboutemy $
  * @since 2.0
  */
 @Mojo( name = "dependency-convergence", aggregator = true )
@@ -57,11 +71,37 @@ public class DependencyConvergenceReport
     // ----------------------------------------------------------------------
 
     /**
-     * The projects in the current build. The effective-POM for
-     * each of these projects will written.
+     * The projects in the current build. The effective-POM for each of these projects will written.
      */
     @Parameter( property = "reactorProjects", required = true, readonly = true )
     private List<MavenProject> reactorProjects;
+
+    /**
+     * Dependency tree builder, will use it to build dependency tree.
+     */
+    @Component
+    DependencyTreeBuilder dependencyTreeBuilder;
+
+    /**
+     * Use it to build dependency(artifact) tree
+     */
+    @Component
+    ArtifactFactory factory;
+
+    /**
+     * Use it to get artifact metadata source for dependency tree building.
+     */
+    @Component
+    ArtifactMetadataSource metadataSource;
+
+    /**
+     * Artifact collector - takes a set of original artifacts and resolves all of the best versions to use along with
+     * their metadata.
+     */
+    @Component
+    ArtifactCollector collector;
+
+    ArtifactFilter filter = null;
 
     // ----------------------------------------------------------------------
     // Public methods
@@ -82,8 +122,8 @@ public class DependencyConvergenceReport
     @Override
     public boolean canGenerateReport()
     {
-        // only generate the convergency report if we are running a reactor build
-        return reactorProjects.size() > 1;
+        // should generate the convergency report, even its single maven project.
+        return reactorProjects.size() >= 1;
     }
 
     // ----------------------------------------------------------------------
@@ -98,7 +138,16 @@ public class DependencyConvergenceReport
 
         sink.head();
         sink.title();
-        sink.text( getI18nString( locale, "title" ) );
+
+        if ( isReactorBuild() )
+        {
+            sink.text( getI18nString( locale, "reactor.title" ) );
+        }
+        else
+        {
+            sink.text( getI18nString( locale, "title" ) );
+        }
+
         sink.title_();
         sink.head_();
 
@@ -107,10 +156,21 @@ public class DependencyConvergenceReport
         sink.section1();
 
         sink.sectionTitle1();
-        sink.text( getI18nString( locale, "title" ) );
+
+        if ( isReactorBuild() )
+        {
+            sink.text( getI18nString( locale, "reactor.title" ) );
+        }
+        else
+        {
+            sink.text( getI18nString( locale, "title" ) );
+        }
+
         sink.sectionTitle1_();
 
         Map<String, List<ReverseDependencyLink>> dependencyMap = getDependencyMap();
+
+        DependencyAnalyzeResult dependencyResult = analyze( dependencyMap );
 
         // legend
         generateLegend( locale, sink );
@@ -118,12 +178,12 @@ public class DependencyConvergenceReport
         sink.lineBreak();
 
         // stats
-        generateStats( locale, sink, dependencyMap );
+        generateStats( locale, sink, dependencyResult );
 
         sink.section1_();
 
         // convergence
-        generateConvergence( locale, sink, dependencyMap );
+        generateConvergence( locale, sink, dependencyResult );
 
         sink.body_();
         sink.flush();
@@ -135,21 +195,116 @@ public class DependencyConvergenceReport
     // ----------------------------------------------------------------------
 
     /**
+     * Analyze dependency map to get conflicting dependencies & snapshot dependencies.
+     * 
+     * @param dependencyMap
+     * @return DependencyAnalyzeResult
+     */
+    private DependencyAnalyzeResult analyze( Map<String, List<ReverseDependencyLink>> dependencyMap )
+    {
+        DependencyAnalyzeResult dependencyResult = new DependencyAnalyzeResult();
+
+        dependencyResult.setAll( dependencyMap );
+
+        Map<String, List<ReverseDependencyLink>> conflictingDependencyMap = getConflictingDependencies( dependencyMap );
+        dependencyResult.setConflicting( conflictingDependencyMap );
+
+        List<ReverseDependencyLink> snapshots = getSnapshotDependencies( dependencyMap );
+        dependencyResult.setSnapshots( snapshots );
+
+        return dependencyResult;
+    }
+
+    /**
+     * Get snapshots dependencies from all dependency map.
+     * 
+     * @param dependencyMap
+     * @return snapshots dependencies
+     */
+    private List<ReverseDependencyLink> getSnapshotDependencies( Map<String, List<ReverseDependencyLink>> dependencyMap )
+    {
+        List<ReverseDependencyLink> snapshots = new ArrayList<ReverseDependencyLink>();
+        for ( Map.Entry<String, List<ReverseDependencyLink>> entry : dependencyMap.entrySet() )
+        {
+            List<ReverseDependencyLink> depList = entry.getValue();
+            Map<String, List<ReverseDependencyLink>> artifactMap = getSortedUniqueArtifactMap( depList );
+            for ( Map.Entry<String, List<ReverseDependencyLink>> artEntry : artifactMap.entrySet() )
+            {
+                String version = artEntry.getKey();
+                boolean isReactorProject = false;
+
+                Iterator<ReverseDependencyLink> iterator = artEntry.getValue().iterator();
+                // It if enough to check just the first dependency here, because
+                // the dependency is the same in all the RDLs in the List. It's the
+                // reactorProjects that are different.
+                ReverseDependencyLink rdl = null;
+                if ( iterator.hasNext() )
+                {
+                    rdl = iterator.next();
+                    if ( isReactorProject( rdl.getDependency() ) )
+                    {
+                        isReactorProject = true;
+                    }
+                }
+
+                if ( version.endsWith( "-SNAPSHOT" ) && !isReactorProject && rdl != null )
+                {
+                    snapshots.add( rdl );
+                }
+            }
+        }
+
+        return snapshots;
+    }
+
+    /**
+     * Get conflicting dependencies from all dependency map.
+     * 
+     * @param dependencyMap
+     * @return conflicting dependencies
+     */
+    private Map<String, List<ReverseDependencyLink>> getConflictingDependencies( Map<String, List<ReverseDependencyLink>> dependencyMap )
+    {
+        Map<String, List<ReverseDependencyLink>> newMap = new HashMap<String, List<ReverseDependencyLink>>();
+        for ( Map.Entry<String, List<ReverseDependencyLink>> entry : dependencyMap.entrySet() )
+        {
+            if ( entry.getValue().size() <= 1 )
+            {
+                continue;
+            }
+
+            newMap.put( entry.getKey(), entry.getValue() );
+        }
+
+        return newMap;
+    }
+
+    /**
      * Generate the convergence table for all dependencies
-     *
+     * 
      * @param locale
      * @param sink
-     * @param dependencyMap
+     * @param conflictingDependencyMap
      */
-    private void generateConvergence( Locale locale, Sink sink, Map<String, List<ReverseDependencyLink>> dependencyMap )
+    private void generateConvergence( Locale locale, Sink sink, DependencyAnalyzeResult result )
     {
         sink.section2();
 
         sink.sectionTitle2();
-        sink.text( getI18nString( locale, "convergence.caption" ) );
+
+        if (isReactorBuild())
+        {
+            sink.text( getI18nString( locale, "convergence.caption" ) );
+        }
+        else
+        {
+            sink.text( getI18nString( locale, "convergence.single.caption" ) );
+        }
+        
         sink.sectionTitle2_();
 
-        for ( Map.Entry<String, List<ReverseDependencyLink>> entry : dependencyMap.entrySet() )
+        // print conflicting dependencies
+        for ( Map.Entry<String, List<ReverseDependencyLink>> entry : result.getConflicting().entrySet() )
         {
             String key = entry.getKey();
             List<ReverseDependencyLink> depList = entry.getValue();
@@ -164,12 +319,30 @@ public class DependencyConvergenceReport
             sink.section3_();
         }
 
+        // print out snapshots jars
+        for ( ReverseDependencyLink dependencyLink : result.getSnapshots() )
+        {
+            sink.section3();
+            sink.sectionTitle3();
+
+            Dependency dep = dependencyLink.getDependency();
+
+            sink.text( dep.getGroupId() + ":" + dep.getArtifactId() );
+            sink.sectionTitle3_();
+
+            List<ReverseDependencyLink> depList = new ArrayList<ReverseDependencyLink>();
+            depList.add( dependencyLink );
+            generateDependencyDetails( sink, depList );
+
+            sink.section3_();
+        }
+
         sink.section2_();
     }
 
     /**
      * Generate the detail table for a given dependency
-     *
+     * 
      * @param sink
      * @param depList
      */
@@ -181,15 +354,10 @@ public class DependencyConvergenceReport
 
         sink.tableRow();
 
-        sink.tableCell( );
-        if ( artifactMap.size() > 1 )
-        {
-            iconError( sink );
-        }
-        else
-        {
-            iconSuccess( sink );
-        }
+        sink.tableCell();
+
+        iconError( sink );
+
         sink.tableCell_();
 
         sink.tableCell();
@@ -199,7 +367,7 @@ public class DependencyConvergenceReport
         for ( String version : artifactMap.keySet() )
         {
             sink.tableRow();
-            sink.tableCell( new SinkEventAttributeSet( new String[] {SinkEventAttributes.WIDTH, "25%"} ) );
+            sink.tableCell( new SinkEventAttributeSet( new String[] { SinkEventAttributes.WIDTH, "25%" } ) );
             sink.text( version );
             sink.tableCell_();
 
@@ -217,35 +385,60 @@ public class DependencyConvergenceReport
         sink.table_();
     }
 
-    private void generateVersionDetails( Sink sink, Map<String, List<ReverseDependencyLink>> artifactMap,
-                                         String version )
+    /**
+     * Generate version details for a given dependency
+     * 
+     * @param sink
+     * @param artifactMap
+     * @param version
+     */
+    private void generateVersionDetails( Sink sink, Map<String, List<ReverseDependencyLink>> artifactMap, String version )
     {
-        sink.numberedList( 1 ); // Use lower alpha numbering
+        sink.numberedList( 0 ); // Use lower alpha numbering
         List<ReverseDependencyLink> depList = artifactMap.get( version );
         Collections.sort( depList, new ReverseDependencyLinkComparator() );
 
         for ( ReverseDependencyLink rdl : depList )
         {
+            if ( rdl.getDependencyNode() == null && depList.size() > 1 )
+            {
+                continue;
+            }
+
             sink.numberedListItem();
-            if ( StringUtils.isNotEmpty( rdl.project.getUrl() ) )
+
+            if ( isReactorBuild() )
             {
-                sink.link( rdl.project.getUrl() );
+                MavenProject project = rdl.getProject();
+                link( sink, rdl.project.getUrl() );
+                sink.text( project.getGroupId() + ":" + project.getArtifactId() + ":" + project.getVersion() );
+                link_( sink, rdl.project.getUrl() );
+                sink.lineBreak();
             }
-            sink.text( rdl.project.getGroupId() + ":" + rdl.project.getArtifactId() );
-            if ( StringUtils.isNotEmpty( rdl.project.getUrl() ) )
+
+            if ( rdl.getDependencyNode() == null )
             {
-                sink.link_();
+                Dependency dep = rdl.getDependency();
+                sink.text( dep.getGroupId() + ":" + dep.getArtifactId() + ":" + dep.getVersion() );
             }
+            else
+            {
+                buildTreeSink( rdl, sink, isReactorBuild() );
+            }
+
             sink.numberedListItem_();
+            if ( isReactorBuild() )
+            {
+                sink.lineBreak();
+            }
         }
         sink.numberedList_();
     }
 
     /**
-     * Produce a Map of relationships between dependencies (its version) and
-     * reactor projects.
-     *
-     * This is the structure of the Map:
+     * Produce a Map of relationships between dependencies (its version) and reactor projects. This is the structure of
+     * the Map:
+     * 
      * <pre>
      * +--------------------+----------------------------------+
      * | key                | value                            |
@@ -257,7 +450,7 @@ public class DependencyConvergenceReport
      * |                    | +------------+-----------------+ |
      * +--------------------+----------------------------------+
      * </pre>
-     *
+     * 
      * @return A Map of sorted unique artifacts
      */
     private Map<String, List<ReverseDependencyLink>> getSortedUniqueArtifactMap( List<ReverseDependencyLink> depList )
@@ -281,7 +474,7 @@ public class DependencyConvergenceReport
 
     /**
      * Generate the legend table
-     *
+     * 
      * @param locale
      * @param sink
      */
@@ -296,18 +489,7 @@ public class DependencyConvergenceReport
 
         sink.tableRow();
 
-        sink.tableCell( );
-        iconSuccess( sink );
-        sink.tableCell_();
         sink.tableCell();
-        sink.text( getI18nString( locale, "legend.shared" ) );
-        sink.tableCell_();
-
-        sink.tableRow_();
-
-        sink.tableRow();
-
-        sink.tableCell( );
         iconError( sink );
         sink.tableCell_();
         sink.tableCell();
@@ -321,23 +503,18 @@ public class DependencyConvergenceReport
 
     /**
      * Generate the statistic table
-     *
+     * 
      * @param locale
      * @param sink
      * @param dependencyMap
      */
-    private void generateStats( Locale locale, Sink sink, Map<String, List<ReverseDependencyLink>> dependencyMap )
+    private void generateStats( Locale locale, Sink sink, DependencyAnalyzeResult result )
     {
-        int depCount = dependencyMap.size();
-        int artifactCount = 0;
-        int snapshotCount = 0;
+        int depCount = result.getDependencyCount();
 
-        for ( List<ReverseDependencyLink> depList : dependencyMap.values() )
-        {
-            Map<String, List<ReverseDependencyLink>> artifactMap = getSortedUniqueArtifactMap( depList );
-            snapshotCount += countSnapshots( artifactMap );
-            artifactCount += artifactMap.size();
-        }
+        int artifactCount = result.getArtifactCount();
+        int snapshotCount = result.getSnapshotCount();
+        int conflictingCount = result.getConflictingCount();
 
         int convergence = (int) ( ( (double) depCount / (double) artifactCount ) * PERCENTAGE );
 
@@ -349,17 +526,20 @@ public class DependencyConvergenceReport
         sink.bold_();
         sink.tableCaption_();
 
-        sink.tableRow();
-        sink.tableHeaderCell( );
-        sink.text( getI18nString( locale, "stats.subprojects" ) );
-        sink.tableHeaderCell_();
-        sink.tableCell();
-        sink.text( String.valueOf( reactorProjects.size() ) );
-        sink.tableCell_();
-        sink.tableRow_();
+        if ( isReactorBuild() )
+        {
+            sink.tableRow();
+            sink.tableHeaderCell();
+            sink.text( getI18nString( locale, "stats.subprojects" ) );
+            sink.tableHeaderCell_();
+            sink.tableCell();
+            sink.text( String.valueOf( reactorProjects.size() ) );
+            sink.tableCell_();
+            sink.tableRow_();
+        }
 
         sink.tableRow();
-        sink.tableHeaderCell( );
+        sink.tableHeaderCell();
         sink.text( getI18nString( locale, "stats.dependencies" ) );
         sink.tableHeaderCell_();
         sink.tableCell();
@@ -368,7 +548,7 @@ public class DependencyConvergenceReport
         sink.tableRow_();
 
         sink.tableRow();
-        sink.tableHeaderCell( );
+        sink.tableHeaderCell();
         sink.text( getI18nString( locale, "stats.artifacts" ) );
         sink.tableHeaderCell_();
         sink.tableCell();
@@ -377,7 +557,16 @@ public class DependencyConvergenceReport
         sink.tableRow_();
 
         sink.tableRow();
-        sink.tableHeaderCell( );
+        sink.tableHeaderCell();
+        sink.text( getI18nString( locale, "stats.conflicting" ) );
+        sink.tableHeaderCell_();
+        sink.tableCell();
+        sink.text( String.valueOf( conflictingCount ) );
+        sink.tableCell_();
+        sink.tableRow_();
+
+        sink.tableRow();
+        sink.tableHeaderCell();
         sink.text( getI18nString( locale, "stats.snapshots" ) );
         sink.tableHeaderCell_();
         sink.tableCell();
@@ -386,7 +575,7 @@ public class DependencyConvergenceReport
         sink.tableRow_();
 
         sink.tableRow();
-        sink.tableHeaderCell( );
+        sink.tableHeaderCell();
         sink.text( getI18nString( locale, "stats.convergence" ) );
         sink.tableHeaderCell_();
         sink.tableCell();
@@ -406,7 +595,7 @@ public class DependencyConvergenceReport
         sink.tableRow_();
 
         sink.tableRow();
-        sink.tableHeaderCell( );
+        sink.tableHeaderCell();
         sink.text( getI18nString( locale, "stats.readyrelease" ) );
         sink.tableHeaderCell_();
         sink.tableCell();
@@ -442,38 +631,9 @@ public class DependencyConvergenceReport
         sink.table_();
     }
 
-    private int countSnapshots( Map<String, List<ReverseDependencyLink>> artifactMap )
-    {
-        int count = 0;
-        for ( Map.Entry<String, List<ReverseDependencyLink>> entry : artifactMap.entrySet() )
-        {
-            String version = entry.getKey();
-            boolean isReactorProject = false;
-
-            Iterator<ReverseDependencyLink> iterator = entry.getValue().iterator();
-            // It if enough to check just the first dependency here, because
-            // the dependency is the same in all the RDLs in the List. It's the
-            // reactorProjects that are different.
-            if ( iterator.hasNext() )
-            {
-                ReverseDependencyLink rdl = iterator.next();
-                if ( isReactorProject( rdl.getDependency() ) )
-                {
-                    isReactorProject = true;
-                }
-            }
-
-            if ( version.endsWith( "-SNAPSHOT" ) && !isReactorProject )
-            {
-                count++;
-            }
-        }
-        return count;
-    }
-
     /**
      * Check to see if the specified dependency is among the reactor projects.
-     *
+     * 
      * @param dependency The dependency to check
      * @return true if and only if the dependency is a reactor project
      */
@@ -492,6 +652,27 @@ public class DependencyConvergenceReport
             }
         }
         return false;
+    }
+
+    private boolean isReactorBuild()
+    {
+        return this.reactorProjects.size() > 1;
+    }
+
+    private static void link( Sink sink, String url )
+    {
+        if ( StringUtils.isNotEmpty( url ) )
+        {
+            sink.link( url );
+        }
+    }
+
+    private static void link_( Sink sink, String url )
+    {
+        if ( StringUtils.isNotEmpty( url ) )
+        {
+            sink.link_();
+        }
     }
 
     private void iconSuccess( Sink sink )
@@ -515,10 +696,9 @@ public class DependencyConvergenceReport
     }
 
     /**
-     * Produce a Map of relationships between dependencies
-     * (its groupId:artifactId) and reactor projects.
-     *
-     * This is the structure of the Map:
+     * Produce a Map of relationships between dependencies (its groupId:artifactId) and reactor projects. This is the
+     * structure of the Map:
+     * 
      * <pre>
      * +--------------------+----------------------------------+
      * | key                | value                            |
@@ -530,27 +710,230 @@ public class DependencyConvergenceReport
      * |                    | +------------+-----------------+ |
      * +--------------------+----------------------------------+
      * </pre>
-     *
+     * 
      * @return A Map of relationships between dependencies and reactor projects
+     * @throws MavenReportException
      */
     private Map<String, List<ReverseDependencyLink>> getDependencyMap()
+        throws MavenReportException
     {
         Map<String, List<ReverseDependencyLink>> dependencyMap = new TreeMap<String, List<ReverseDependencyLink>>();
 
         for ( MavenProject reactorProject : reactorProjects )
         {
-            for (Dependency dep : (Iterable<Dependency>) reactorProject.getDependencies()) {
-                String key = dep.getGroupId() + ":" + dep.getArtifactId();
-                List<ReverseDependencyLink> depList = dependencyMap.get(key);
-                if (depList == null) {
-                    depList = new ArrayList<ReverseDependencyLink>();
+            DependencyNode node = getNode( project );
+
+            DependencyVersionMap visitor = new DependencyVersionMap();
+            visitor.setUniqueVersions( true );
+
+            node.accept( visitor );
+
+            for ( List<DependencyNode> nodes : visitor.getConflictedVersionNumbers() )
+            {
+                DependencyNode dependencyNode = nodes.get( 0 );
+
+                String key =
+                    dependencyNode.getArtifact().getGroupId() + ":" + dependencyNode.getArtifact().getArtifactId();
+
+                List<ReverseDependencyLink> dependencyList = dependencyMap.get( key );
+                if ( dependencyList == null )
+                {
+                    dependencyList = new ArrayList<ReverseDependencyLink>();
                 }
-                depList.add(new ReverseDependencyLink(dep, reactorProject));
-                dependencyMap.put(key, depList);
+
+                dependencyList.add( new ReverseDependencyLink( toDependency( dependencyNode.getArtifact() ),
+                                                               reactorProject, dependencyNode ) );
+
+                for ( DependencyNode workNode : nodes.subList( 1, nodes.size() ) )
+                {
+                    dependencyList.add( new ReverseDependencyLink( toDependency( workNode.getArtifact() ),
+                                                                   reactorProject, workNode ) );
+                }
+
+                dependencyMap.put( key, dependencyList );
             }
+
+            Set<Artifact> artifacts = getAllDescendants( node );
+
+            for ( Artifact art : artifacts )
+            {
+                String key = art.getGroupId() + ":" + art.getArtifactId();
+
+                List<ReverseDependencyLink> reverseDepependencies = dependencyMap.get( key );
+                if ( reverseDepependencies == null )
+                {
+                    reverseDepependencies = new ArrayList<ReverseDependencyLink>();
+                }
+
+                if ( !containsDependency( reverseDepependencies, art ) )
+                {
+                    reverseDepependencies.add( new ReverseDependencyLink( toDependency( art ), reactorProject, null ) );
+                }
+
+                dependencyMap.put( key, reverseDepependencies );
+            }
+
         }
 
         return dependencyMap;
+    }
+
+    /**
+     * Convert Artifact to Dependency
+     * 
+     * @param artifact
+     * @return Dependency object
+     */
+    private Dependency toDependency( Artifact artifact )
+    {
+        Dependency dependency = new Dependency();
+        dependency.setGroupId( artifact.getGroupId() );
+        dependency.setArtifactId( artifact.getArtifactId() );
+        dependency.setVersion( artifact.getVersion() );
+        dependency.setClassifier( artifact.getClassifier() );
+        dependency.setScope( artifact.getScope() );
+
+        return dependency;
+    }
+
+    /**
+     * To check whether dependency list contains a given artifact.
+     * 
+     * @param reverseDependencies
+     * @param art
+     * @return contains:true; Not contains:false;
+     */
+    private boolean containsDependency( List<ReverseDependencyLink> reverseDependencies, Artifact art )
+    {
+
+        for ( ReverseDependencyLink revDependency : reverseDependencies )
+        {
+            Dependency dep = revDependency.getDependency();
+            if ( dep.getGroupId().equals( art.getGroupId() ) && dep.getArtifactId().equals( art.getArtifactId() )
+                && dep.getVersion().equals( art.getVersion() ) )
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Get root node of dependency tree for a given project
+     * 
+     * @param project
+     * @return root node of dependency tree
+     * @throws MavenReportException
+     */
+    private DependencyNode getNode( MavenProject project )
+        throws MavenReportException
+    {
+        try
+        {
+            DependencyNode node =
+                (DependencyNode) dependencyTreeBuilder.buildDependencyTree( project, localRepository, factory,
+                                                                            metadataSource, filter, collector );
+
+            return node;
+        }
+        catch ( DependencyTreeBuilderException e )
+        {
+            throw new MavenReportException( "Could not build dependency tree " + e.getLocalizedMessage(), e );
+        }
+    }
+
+    /**
+     * Get full name for a given artifact. {groupId}:{artifactId}:{version}
+     * 
+     * @param artifact
+     * @return full name of a given artifact.
+     */
+    private static String getFullArtifactName( Artifact artifact )
+    {
+        return artifact.getGroupId() + ":" + artifact.getArtifactId() + ":" + artifact.getVersion();
+    }
+
+    /**
+     * Build tree sinks, help user to resolve conflicting issues easily.
+     * 
+     * @param node
+     * @param sink
+     */
+    private static void buildTreeSink( ReverseDependencyLink rdl, Sink sink, boolean isReactorBuild )
+    {
+        DependencyNode node = rdl.getDependencyNode();
+
+        if ( node == null )
+        {
+            return;
+        }
+
+        List<String> loc = new ArrayList<String>();
+        DependencyNode currentNode = node;
+        while ( currentNode != null )
+        {
+            if ( currentNode.getParent() == null )
+            {
+                break;
+            }
+
+            loc.add( getFullArtifactName( currentNode.getArtifact() ) );
+            currentNode = currentNode.getParent();
+        }
+
+        Collections.reverse( loc );
+
+        for ( String locElement : loc )
+        {
+            int j = 0;
+            int idx = loc.indexOf( locElement );
+            while ( j <= idx )
+            {
+                sink.nonBreakingSpace();
+                sink.nonBreakingSpace();
+                sink.nonBreakingSpace();
+                sink.nonBreakingSpace();
+                j++;
+            }
+
+            if ( idx == loc.size() - 1 )
+            {
+                sink.text( "\\-" + locElement );
+            }
+            else
+            {
+                sink.text( "+-" + locElement );
+            }
+
+            sink.lineBreak();
+        }
+
+    }
+
+    /**
+     * Get all descendants nodes for a given dependency node.
+     * 
+     * @param node
+     * @return set of descendants artifacts.
+     */
+    private Set<Artifact> getAllDescendants( DependencyNode node )
+    {
+        Set<Artifact> children = null;
+        if ( node.getChildren() != null )
+        {
+            children = new HashSet<Artifact>();
+            for ( DependencyNode depNode : node.getChildren() )
+            {
+                children.add( depNode.getArtifact() );
+                Set<Artifact> subNodes = getAllDescendants( depNode );
+                if ( subNodes != null )
+                {
+                    children.addAll( subNodes );
+                }
+            }
+        }
+        return children;
     }
 
     /**
@@ -562,10 +945,13 @@ public class DependencyConvergenceReport
 
         protected MavenProject project;
 
-        ReverseDependencyLink( Dependency dependency, MavenProject project )
+        private DependencyNode node;
+
+        ReverseDependencyLink( Dependency dependency, MavenProject project, DependencyNode node )
         {
             this.dependency = dependency;
             this.project = project;
+            this.node = node;
         }
 
         public Dependency getDependency()
@@ -576,6 +962,11 @@ public class DependencyConvergenceReport
         public MavenProject getProject()
         {
             return project;
+        }
+
+        public DependencyNode getDependencyNode()
+        {
+            return node;
         }
 
         @Override
@@ -597,4 +988,69 @@ public class DependencyConvergenceReport
             return p1.getProject().getId().compareTo( p2.getProject().getId() );
         }
     }
+
+    /**
+     * Internal object
+     */
+    private class DependencyAnalyzeResult
+    {
+        Map<String, List<ReverseDependencyLink>> all;
+
+        List<ReverseDependencyLink> snapshots;
+
+        Map<String, List<ReverseDependencyLink>> conflicting;
+
+        public void setAll( Map<String, List<ReverseDependencyLink>> all )
+        {
+            this.all = all;
+        }
+
+        public List<ReverseDependencyLink> getSnapshots()
+        {
+            return snapshots;
+        }
+
+        public void setSnapshots( List<ReverseDependencyLink> snapshots )
+        {
+            this.snapshots = snapshots;
+        }
+
+        public Map<String, List<ReverseDependencyLink>> getConflicting()
+        {
+            return conflicting;
+        }
+
+        public void setConflicting( Map<String, List<ReverseDependencyLink>> conflicting )
+        {
+            this.conflicting = conflicting;
+        }
+
+        public int getDependencyCount()
+        {
+            return all.size();
+        }
+
+        public int getSnapshotCount()
+        {
+            return this.snapshots.size();
+        }
+
+        public int getConflictingCount()
+        {
+            return this.conflicting.size();
+        }
+
+        public int getArtifactCount()
+        {
+            int artifactCount = 0;
+            for ( List<ReverseDependencyLink> depList : this.all.values() )
+            {
+                Map<String, List<ReverseDependencyLink>> artifactMap = getSortedUniqueArtifactMap( depList );
+                artifactCount += artifactMap.size();
+            }
+
+            return artifactCount;
+        }
+    }
+
 }
