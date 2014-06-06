@@ -60,7 +60,6 @@ import org.apache.maven.shared.dependency.tree.traversal.BuildingDependencyNodeV
 import org.apache.maven.shared.dependency.tree.traversal.CollectingDependencyNodeVisitor;
 import org.apache.maven.shared.dependency.tree.traversal.DependencyNodeVisitor;
 import org.apache.maven.shared.dependency.tree.traversal.FilteringDependencyNodeVisitor;
-import org.codehaus.plexus.util.StringUtils;
 
 /**
  * Generates the Dependency Convergence report for reactor builds.
@@ -367,53 +366,30 @@ public class DependencyConvergenceReport
 
         List<DependencyNode> projectNodes = getProjectNodes( depList );
 
+        if (projectNodes == null || projectNodes.size() == 0){
+            getLog().warn( "Can't find project nodes for dependency list:" + depList.get( 0 ).getDependency().toString() );
+            return;
+        }
         Collections.sort( projectNodes, new DependencyNodeComparator() );
 
         for ( DependencyNode projectNode : projectNodes )
         {
+            if (isReactorBuild()){
+                sink.numberedListItem();
+            }
+            
             showVersionDetails( projectNode, depList, sink );
+            
+            if (isReactorBuild()){
+                sink.numberedListItem_();
+            }
+            
+            sink.lineBreak();
         }
-//        Collections.sort( depList, new ReverseDependencyLinkComparator() );
-//
-//        for ( ReverseDependencyLink rdl : depList )
-//        {
-//            if ( rdl.getDependencyNode() == null && depList.size() > 1 )
-//            {
-//                continue;
-//            }
-//
-//            sink.numberedListItem();
-//
-//            if ( isReactorBuild() )
-//            {
-//                MavenProject project = rdl.getProject();
-//                link( sink, rdl.project.getUrl() );
-//                sink.text( project.getGroupId() + ":" + project.getArtifactId() + ":" + project.getVersion() );
-//                link_( sink, rdl.project.getUrl() );
-//                sink.lineBreak();
-//            }
-//
-//            if ( rdl.getDependencyNode() == null )
-//            {
-//                Dependency dep = rdl.getDependency();
-//                sink.text( dep.getGroupId() + ":" + dep.getArtifactId() + ":" + dep.getVersion() );
-//            }
-//            else
-//            {
-//                buildTreeSink( rdl, sink, isReactorBuild() );
-//            }
-//
-//            sink.numberedListItem_();
-//            if ( isReactorBuild() )
-//            {
-//                sink.lineBreak();
-//            }
-//        }
+
         sink.numberedList_();
     }
     
-    
-
     private List<DependencyNode> getProjectNodes( List<ReverseDependencyLink> depList )
     {
         List<DependencyNode> projectNodes = new ArrayList<DependencyNode>();
@@ -421,14 +397,14 @@ public class DependencyConvergenceReport
         for ( ReverseDependencyLink depLink : depList )
         {
             MavenProject project = depLink.getProject();
-            DependencyNode projectNode = projectMap.get( project );
+            DependencyNode projectNode = this.projectMap.get( project );
 
-            if ( projectNode != null )
+            if ( projectNode != null && !projectNodes.contains( projectNode ))
             {
                 projectNodes.add( projectNode );
             }
         }
-        return null;
+        return projectNodes;
     }
 
     private void showVersionDetails( DependencyNode projectNode, List<ReverseDependencyLink> depList, Sink sink )
@@ -437,7 +413,8 @@ public class DependencyConvergenceReport
             return;
         }
         
-        String key = depList.get( 0 ).getDependency().getGroupId() + ":" + depList.get( 0 ).getDependency().getArtifactId();
+        Dependency dependency = depList.get( 0 ).getDependency();
+        String key = dependency.getGroupId() + ":" + dependency.getArtifactId() + ":" + dependency.getType() + ":" + dependency.getVersion();
         
         serializeDependencyTree(projectNode, key, sink);
         
@@ -848,12 +825,11 @@ public class DependencyConvergenceReport
             }
 
             dependencyList.add( new ReverseDependencyLink( toDependency( dependencyNode.getArtifact() ),
-                                                           reactorProject, dependencyNode ) );
+                                                           reactorProject ) );
 
             for ( DependencyNode workNode : nodes.subList( 1, nodes.size() ) )
             {
-                dependencyList.add( new ReverseDependencyLink( toDependency( workNode.getArtifact() ), reactorProject,
-                                                               workNode ) );
+                dependencyList.add( new ReverseDependencyLink( toDependency( workNode.getArtifact() ), reactorProject) );
             }
 
             conflictingDependencyMap.put( key, dependencyList );
@@ -884,7 +860,7 @@ public class DependencyConvergenceReport
 
             if ( !containsDependency( reverseDepependencies, art ) )
             {
-                reverseDepependencies.add( new ReverseDependencyLink( toDependency( art ), reactorProject, null ) );
+                reverseDepependencies.add( new ReverseDependencyLink( toDependency( art ), reactorProject ) );
             }
 
             allDependencies.put( key, reverseDepependencies );
@@ -1058,13 +1034,10 @@ public class DependencyConvergenceReport
 
         protected MavenProject project;
 
-        private DependencyNode node;
-
-        ReverseDependencyLink( Dependency dependency, MavenProject project, DependencyNode node )
+        ReverseDependencyLink( Dependency dependency, MavenProject project )
         {
             this.dependency = dependency;
             this.project = project;
-            this.node = node;
         }
 
         public Dependency getDependency()
@@ -1075,11 +1048,6 @@ public class DependencyConvergenceReport
         public MavenProject getProject()
         {
             return project;
-        }
-
-        public DependencyNode getDependencyNode()
-        {
-            return node;
         }
 
         @Override

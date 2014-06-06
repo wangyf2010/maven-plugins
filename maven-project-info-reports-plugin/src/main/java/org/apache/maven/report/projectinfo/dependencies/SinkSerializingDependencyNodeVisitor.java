@@ -25,6 +25,8 @@ import org.apache.maven.doxia.sink.Sink;
 import org.apache.maven.shared.dependency.tree.DependencyNode;
 import org.apache.maven.shared.dependency.tree.traversal.DependencyNodeVisitor;
 
+
+
 /**
  * A dependency node visitor that serializes visited nodes to a sink writer.
  * It's used to serialize tree in project information report page.
@@ -39,52 +41,39 @@ public class SinkSerializingDependencyNodeVisitor
     /**
      * Provides tokens to use when serializing the dependency tree.
      */
-    public static class TreeTokens
+    private class TreeTokens
     {
-        private final String nodeIndent;
+        private final Sink sink;
 
-        private final String lastNodeIndent;
-
-        private final String fillIndent;
-
-        private final String lastFillIndent;
-
-        public TreeTokens( String nodeIndent, String lastNodeIndent, String fillIndent, String lastFillIndent )
+        public TreeTokens( Sink sink )
         {
-            this.nodeIndent = nodeIndent;
-            this.lastNodeIndent = lastNodeIndent;
-            this.fillIndent = fillIndent;
-            this.lastFillIndent = lastFillIndent;
+            this.sink = sink;
         }
 
-        public String getNodeIndent( boolean last )
+        public void addNodeIndent( boolean last )
         {
-            return last ? lastNodeIndent : nodeIndent;
+            if (last){
+                sink.text( "\\-" );
+                sink.nonBreakingSpace();
+            }else{
+                sink.text( "+-" );
+                sink.nonBreakingSpace();
+            }
         }
 
-        public String getFillIndent( boolean last )
+        public void fillIndent( boolean last )
         {
-            return last ? lastFillIndent : fillIndent;
+            if (last){
+                sink.nonBreakingSpace();
+                sink.nonBreakingSpace();
+                sink.nonBreakingSpace();
+            }else{
+                sink.text( "|" );
+                sink.nonBreakingSpace();
+                sink.nonBreakingSpace();
+            }
         }
     }
-
-    // constants --------------------------------------------------------------
-
-    /**
-     * Whitespace tokens to use when outputing the dependency tree.
-     */
-    public static final TreeTokens WHITESPACE_TOKENS = new TreeTokens( "   ", "   ", "   ", "   " );
-
-    /**
-     * The standard ASCII tokens to use when outputing the dependency tree.
-     */
-    public static final TreeTokens STANDARD_TOKENS = new TreeTokens( "+- ", "\\- ", "|  ", "   " );
-
-    /**
-     * The extended ASCII tokens to use when outputing the dependency tree.
-     */
-    public static final TreeTokens EXTENDED_TOKENS =
-        new TreeTokens( "\u00c3\u00c4 ", "\u00c0\u00c4 ", "\u00b3  ", "   " );
 
     // fields -----------------------------------------------------------------
 
@@ -96,7 +85,7 @@ public class SinkSerializingDependencyNodeVisitor
     /**
      * The tokens to use when serializing the dependency tree.
      */
-    private final TreeTokens tokens;
+    private final TreeTokens tokens ;
 
     /**
      * The depth of the currently visited dependency node.
@@ -104,17 +93,6 @@ public class SinkSerializingDependencyNodeVisitor
     private int depth;
 
     // constructors -----------------------------------------------------------
-
-    /**
-     * Creates a dependency node visitor that serializes visited nodes to the specified writer using whitespace tokens.
-     * 
-     * @param sink
-     *            the writer to serialize to
-     */
-    public SinkSerializingDependencyNodeVisitor( Sink sink )
-    {
-        this( sink, STANDARD_TOKENS );
-    }
 
     /**
      * Creates a dependency node visitor that serializes visited nodes to the specified writer using the specified
@@ -125,12 +103,10 @@ public class SinkSerializingDependencyNodeVisitor
      * @param tokens
      *            the tokens to use when serializing the dependency tree
      */
-    public SinkSerializingDependencyNodeVisitor( Sink sink, TreeTokens tokens )
+    public SinkSerializingDependencyNodeVisitor( Sink sink )
     {
         this.sink = sink;
-
-        this.tokens = tokens;
-
+        this.tokens = new TreeTokens(sink);
         depth = 0;
     }
 
@@ -173,12 +149,12 @@ public class SinkSerializingDependencyNodeVisitor
     {
         for ( int i = 1; i < depth; i++ )
         {
-            sink.text( tokens.getFillIndent( isLast( node, i ) ) );
+            tokens.fillIndent( isLast( node, i ) );
         }
 
         if ( depth > 0 )
         {
-            sink.text( tokens.getNodeIndent( isLast( node ) ) );
+            tokens.addNodeIndent( isLast( node ) );
         }
     }
 

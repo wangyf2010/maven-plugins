@@ -32,6 +32,8 @@ import org.apache.maven.artifact.Artifact;
 import org.apache.maven.shared.dependency.tree.DependencyNode;
 import org.apache.maven.shared.dependency.tree.traversal.DependencyNodeVisitor;
 
+
+
 public class DependencyVersionMap implements DependencyNodeVisitor
 {
     private boolean uniqueVersions;
