@@ -22,7 +22,6 @@ package org.apache.maven.report.projectinfo;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
@@ -168,9 +167,7 @@ public class DependencyConvergenceReport
 
         sink.sectionTitle1_();
 
-        Map<String, List<ReverseDependencyLink>> dependencyMap = getDependencyMap();
-
-        DependencyAnalyzeResult dependencyResult = analyze( dependencyMap );
+        DependencyAnalyzeResult dependencyResult = analyzeDependencyTree();
 
         // legend
         generateLegend( locale, sink );
@@ -193,27 +190,6 @@ public class DependencyConvergenceReport
     // ----------------------------------------------------------------------
     // Private methods
     // ----------------------------------------------------------------------
-
-    /**
-     * Analyze dependency map to get conflicting dependencies & snapshot dependencies.
-     * 
-     * @param dependencyMap
-     * @return DependencyAnalyzeResult
-     */
-    private DependencyAnalyzeResult analyze( Map<String, List<ReverseDependencyLink>> dependencyMap )
-    {
-        DependencyAnalyzeResult dependencyResult = new DependencyAnalyzeResult();
-
-        dependencyResult.setAll( dependencyMap );
-
-        Map<String, List<ReverseDependencyLink>> conflictingDependencyMap = getConflictingDependencies( dependencyMap );
-        dependencyResult.setConflicting( conflictingDependencyMap );
-
-        List<ReverseDependencyLink> snapshots = getSnapshotDependencies( dependencyMap );
-        dependencyResult.setSnapshots( snapshots );
-
-        return dependencyResult;
-    }
 
     /**
      * Get snapshots dependencies from all dependency map.
@@ -258,28 +234,6 @@ public class DependencyConvergenceReport
     }
 
     /**
-     * Get conflicting dependencies from all dependency map.
-     * 
-     * @param dependencyMap
-     * @return conflicting dependencies
-     */
-    private Map<String, List<ReverseDependencyLink>> getConflictingDependencies( Map<String, List<ReverseDependencyLink>> dependencyMap )
-    {
-        Map<String, List<ReverseDependencyLink>> newMap = new HashMap<String, List<ReverseDependencyLink>>();
-        for ( Map.Entry<String, List<ReverseDependencyLink>> entry : dependencyMap.entrySet() )
-        {
-            if ( entry.getValue().size() <= 1 )
-            {
-                continue;
-            }
-
-            newMap.put( entry.getKey(), entry.getValue() );
-        }
-
-        return newMap;
-    }
-
-    /**
      * Generate the convergence table for all dependencies
      * 
      * @param locale
@@ -292,7 +246,7 @@ public class DependencyConvergenceReport
 
         sink.sectionTitle2();
 
-        if (isReactorBuild())
+        if ( isReactorBuild() )
         {
             sink.text( getI18nString( locale, "convergence.caption" ) );
         }
@@ -300,7 +254,7 @@ public class DependencyConvergenceReport
         {
             sink.text( getI18nString( locale, "convergence.single.caption" ) );
         }
-        
+
         sink.sectionTitle2_();
 
         // print conflicting dependencies
@@ -696,86 +650,133 @@ public class DependencyConvergenceReport
     }
 
     /**
-     * Produce a Map of relationships between dependencies (its groupId:artifactId) and reactor projects. This is the
+     * Produce a DependencyAnalyzeResult, it contains conflicting dependencies map, snapshot dependencies map and all dependencies map.
+     * Map structure is the relationships between dependencies (its groupId:artifactId) and reactor projects. This is the
      * structure of the Map:
      * 
      * <pre>
-     * +--------------------+----------------------------------+
-     * | key                | value                            |
-     * +--------------------+----------------------------------+
-     * | groupId:artifactId | A List of ReverseDependencyLinks |
-     * | of a dependency    | which each look like this:       |
-     * |                    | +------------+-----------------+ |
-     * |                    | | dependency | reactor project | |
-     * |                    | +------------+-----------------+ |
-     * +--------------------+----------------------------------+
+     * +--------------------+----------------------------------+---------------|
+     * | key                | value                                            |
+     * +--------------------+----------------------------------+---------------|
+     * | groupId:artifactId | A List of ReverseDependencyLinks                 |
+     * | of a dependency    | which each look like this:                       |
+     * |                    | +------------+-----------------+-----------------|
+     * |                    | | dependency | reactor project | dependency node |
+     * |                    | +------------+-----------------+-----------------|
+     * +--------------------+--------------------------------------------------|
      * </pre>
      * 
-     * @return A Map of relationships between dependencies and reactor projects
+     * @return DependencyAnalyzeResult contains conflicting dependencies map, snapshot dependencies map and all dependencies map.
      * @throws MavenReportException
      */
-    private Map<String, List<ReverseDependencyLink>> getDependencyMap()
+    private DependencyAnalyzeResult analyzeDependencyTree()
         throws MavenReportException
     {
-        Map<String, List<ReverseDependencyLink>> dependencyMap = new TreeMap<String, List<ReverseDependencyLink>>();
+        Map<String, List<ReverseDependencyLink>> conflictingDependencyMap =
+            new TreeMap<String, List<ReverseDependencyLink>>();
+        Map<String, List<ReverseDependencyLink>> allDependencies = new TreeMap<String, List<ReverseDependencyLink>>();
 
         for ( MavenProject reactorProject : reactorProjects )
         {
-            DependencyNode node = getNode( project );
+            DependencyNode node = getNode( reactorProject );
 
-            DependencyVersionMap visitor = new DependencyVersionMap();
-            visitor.setUniqueVersions( true );
+            getConflictingDependencyMap( conflictingDependencyMap, reactorProject, node );
 
-            node.accept( visitor );
-
-            for ( List<DependencyNode> nodes : visitor.getConflictedVersionNumbers() )
-            {
-                DependencyNode dependencyNode = nodes.get( 0 );
-
-                String key =
-                    dependencyNode.getArtifact().getGroupId() + ":" + dependencyNode.getArtifact().getArtifactId();
-
-                List<ReverseDependencyLink> dependencyList = dependencyMap.get( key );
-                if ( dependencyList == null )
-                {
-                    dependencyList = new ArrayList<ReverseDependencyLink>();
-                }
-
-                dependencyList.add( new ReverseDependencyLink( toDependency( dependencyNode.getArtifact() ),
-                                                               reactorProject, dependencyNode ) );
-
-                for ( DependencyNode workNode : nodes.subList( 1, nodes.size() ) )
-                {
-                    dependencyList.add( new ReverseDependencyLink( toDependency( workNode.getArtifact() ),
-                                                                   reactorProject, workNode ) );
-                }
-
-                dependencyMap.put( key, dependencyList );
-            }
-
-            Set<Artifact> artifacts = getAllDescendants( node );
-
-            for ( Artifact art : artifacts )
-            {
-                String key = art.getGroupId() + ":" + art.getArtifactId();
-
-                List<ReverseDependencyLink> reverseDepependencies = dependencyMap.get( key );
-                if ( reverseDepependencies == null )
-                {
-                    reverseDepependencies = new ArrayList<ReverseDependencyLink>();
-                }
-
-                if ( !containsDependency( reverseDepependencies, art ) )
-                {
-                    reverseDepependencies.add( new ReverseDependencyLink( toDependency( art ), reactorProject, null ) );
-                }
-
-                dependencyMap.put( key, reverseDepependencies );
-            }
-
+            getAllDependencyMap( allDependencies, reactorProject, node );
         }
 
-        return dependencyMap;
+        return populateDependencyAnalyzeResult( conflictingDependencyMap, allDependencies );
+    }
+
+    /**
+     * Produce DependencyAnalyzeResult base on conflicting dependencies map, all dependencies map.
+     * 
+     * @param conflictingDependencyMap
+     * @param allDependencies
+     * @return DependencyAnalyzeResult contains conflicting dependencies map, snapshot dependencies map and all dependencies map.
+     */
+    private DependencyAnalyzeResult populateDependencyAnalyzeResult( Map<String, List<ReverseDependencyLink>> conflictingDependencyMap,
+                                                                     Map<String, List<ReverseDependencyLink>> allDependencies )
+    {
+        DependencyAnalyzeResult dependencyResult = new DependencyAnalyzeResult();
+
+        dependencyResult.setAll( allDependencies );
+        dependencyResult.setConflicting( conflictingDependencyMap );
+
+        List<ReverseDependencyLink> snapshots = getSnapshotDependencies( allDependencies );
+        dependencyResult.setSnapshots( snapshots );
+        return dependencyResult;
+    }
+
+    /**
+     * Get conflicting dependency map base on specified dependency node.
+     * 
+     * @param conflictingDependencyMap
+     * @param reactorProject
+     * @param node
+     */
+    private void getConflictingDependencyMap( Map<String, List<ReverseDependencyLink>> conflictingDependencyMap,
+                                              MavenProject reactorProject, DependencyNode node )
+    {
+        DependencyVersionMap visitor = new DependencyVersionMap();
+        visitor.setUniqueVersions( true );
+
+        node.accept( visitor );
+
+        for ( List<DependencyNode> nodes : visitor.getConflictedVersionNumbers() )
+        {
+            DependencyNode dependencyNode = nodes.get( 0 );
+
+            String key = dependencyNode.getArtifact().getGroupId() + ":" + dependencyNode.getArtifact().getArtifactId();
+
+            List<ReverseDependencyLink> dependencyList = conflictingDependencyMap.get( key );
+            if ( dependencyList == null )
+            {
+                dependencyList = new ArrayList<ReverseDependencyLink>();
+            }
+
+            dependencyList.add( new ReverseDependencyLink( toDependency( dependencyNode.getArtifact() ),
+                                                           reactorProject, dependencyNode ) );
+
+            for ( DependencyNode workNode : nodes.subList( 1, nodes.size() ) )
+            {
+                dependencyList.add( new ReverseDependencyLink( toDependency( workNode.getArtifact() ), reactorProject,
+                                                               workNode ) );
+            }
+
+            conflictingDependencyMap.put( key, dependencyList );
+        }
+    }
+
+    /**
+     * Get all dependencies (both directive & transitive dependencies) by specified dependency node.
+     * 
+     * @param allDependencies
+     * @param reactorProject
+     * @param node
+     */
+    private void getAllDependencyMap( Map<String, List<ReverseDependencyLink>> allDependencies,
+                                      MavenProject reactorProject, DependencyNode node )
+    {
+        Set<Artifact> artifacts = getAllDescendants( node );
+
+        for ( Artifact art : artifacts )
+        {
+            String key = art.getGroupId() + ":" + art.getArtifactId();
+
+            List<ReverseDependencyLink> reverseDepependencies = allDependencies.get( key );
+            if ( reverseDepependencies == null )
+            {
+                reverseDepependencies = new ArrayList<ReverseDependencyLink>();
+            }
+
+            if ( !containsDependency( reverseDepependencies, art ) )
+            {
+                reverseDepependencies.add( new ReverseDependencyLink( toDependency( art ), reactorProject, null ) );
+            }
+
+            allDependencies.put( key, reverseDepependencies );
+        }
     }
 
     /**
