@@ -20,8 +20,10 @@ package org.apache.maven.report.projectinfo;
  */
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
@@ -44,10 +46,20 @@ import org.apache.maven.plugins.annotations.Mojo;
 import org.apache.maven.plugins.annotations.Parameter;
 import org.apache.maven.project.MavenProject;
 import org.apache.maven.report.projectinfo.dependencies.DependencyVersionMap;
+import org.apache.maven.report.projectinfo.dependencies.SinkSerializingDependencyNodeVisitor;
 import org.apache.maven.reporting.MavenReportException;
+import org.apache.maven.shared.artifact.filter.StrictPatternIncludesArtifactFilter;
 import org.apache.maven.shared.dependency.tree.DependencyNode;
 import org.apache.maven.shared.dependency.tree.DependencyTreeBuilder;
 import org.apache.maven.shared.dependency.tree.DependencyTreeBuilderException;
+import org.apache.maven.shared.dependency.tree.filter.AncestorOrSelfDependencyNodeFilter;
+import org.apache.maven.shared.dependency.tree.filter.AndDependencyNodeFilter;
+import org.apache.maven.shared.dependency.tree.filter.ArtifactDependencyNodeFilter;
+import org.apache.maven.shared.dependency.tree.filter.DependencyNodeFilter;
+import org.apache.maven.shared.dependency.tree.traversal.BuildingDependencyNodeVisitor;
+import org.apache.maven.shared.dependency.tree.traversal.CollectingDependencyNodeVisitor;
+import org.apache.maven.shared.dependency.tree.traversal.DependencyNodeVisitor;
+import org.apache.maven.shared.dependency.tree.traversal.FilteringDependencyNodeVisitor;
 import org.codehaus.plexus.util.StringUtils;
 
 /**
@@ -101,6 +113,8 @@ public class DependencyConvergenceReport
     ArtifactCollector collector;
 
     ArtifactFilter filter = null;
+    
+    private Map<MavenProject, DependencyNode> projectMap = new HashMap<MavenProject, DependencyNode>();
 
     // ----------------------------------------------------------------------
     // Public methods
@@ -350,43 +364,139 @@ public class DependencyConvergenceReport
     {
         sink.numberedList( 0 ); // Use lower alpha numbering
         List<ReverseDependencyLink> depList = artifactMap.get( version );
-        Collections.sort( depList, new ReverseDependencyLinkComparator() );
 
-        for ( ReverseDependencyLink rdl : depList )
+        List<DependencyNode> projectNodes = getProjectNodes( depList );
+
+        Collections.sort( projectNodes, new DependencyNodeComparator() );
+
+        for ( DependencyNode projectNode : projectNodes )
         {
-            if ( rdl.getDependencyNode() == null && depList.size() > 1 )
-            {
-                continue;
-            }
+            showVersionDetails( projectNode, depList, sink );
+        }
+//        Collections.sort( depList, new ReverseDependencyLinkComparator() );
+//
+//        for ( ReverseDependencyLink rdl : depList )
+//        {
+//            if ( rdl.getDependencyNode() == null && depList.size() > 1 )
+//            {
+//                continue;
+//            }
+//
+//            sink.numberedListItem();
+//
+//            if ( isReactorBuild() )
+//            {
+//                MavenProject project = rdl.getProject();
+//                link( sink, rdl.project.getUrl() );
+//                sink.text( project.getGroupId() + ":" + project.getArtifactId() + ":" + project.getVersion() );
+//                link_( sink, rdl.project.getUrl() );
+//                sink.lineBreak();
+//            }
+//
+//            if ( rdl.getDependencyNode() == null )
+//            {
+//                Dependency dep = rdl.getDependency();
+//                sink.text( dep.getGroupId() + ":" + dep.getArtifactId() + ":" + dep.getVersion() );
+//            }
+//            else
+//            {
+//                buildTreeSink( rdl, sink, isReactorBuild() );
+//            }
+//
+//            sink.numberedListItem_();
+//            if ( isReactorBuild() )
+//            {
+//                sink.lineBreak();
+//            }
+//        }
+        sink.numberedList_();
+    }
+    
+    
 
-            sink.numberedListItem();
+    private List<DependencyNode> getProjectNodes( List<ReverseDependencyLink> depList )
+    {
+        List<DependencyNode> projectNodes = new ArrayList<DependencyNode>();
 
-            if ( isReactorBuild() )
-            {
-                MavenProject project = rdl.getProject();
-                link( sink, rdl.project.getUrl() );
-                sink.text( project.getGroupId() + ":" + project.getArtifactId() + ":" + project.getVersion() );
-                link_( sink, rdl.project.getUrl() );
-                sink.lineBreak();
-            }
+        for ( ReverseDependencyLink depLink : depList )
+        {
+            MavenProject project = depLink.getProject();
+            DependencyNode projectNode = projectMap.get( project );
 
-            if ( rdl.getDependencyNode() == null )
+            if ( projectNode != null )
             {
-                Dependency dep = rdl.getDependency();
-                sink.text( dep.getGroupId() + ":" + dep.getArtifactId() + ":" + dep.getVersion() );
-            }
-            else
-            {
-                buildTreeSink( rdl, sink, isReactorBuild() );
-            }
-
-            sink.numberedListItem_();
-            if ( isReactorBuild() )
-            {
-                sink.lineBreak();
+                projectNodes.add( projectNode );
             }
         }
-        sink.numberedList_();
+        return null;
+    }
+
+    private void showVersionDetails( DependencyNode projectNode, List<ReverseDependencyLink> depList, Sink sink )
+    {
+        if (depList == null || depList.size() == 0){
+            return;
+        }
+        
+        String key = depList.get( 0 ).getDependency().getGroupId() + ":" + depList.get( 0 ).getDependency().getArtifactId();
+        
+        serializeDependencyTree(projectNode, key, sink);
+        
+    }
+    
+    /**
+     * Serializes the specified dependency tree to a string.
+     *
+     * @param rootNode the dependency tree root node to serialize
+     * @return the serialized dependency tree
+     */
+    private void serializeDependencyTree( DependencyNode rootNode, String key, Sink sink )
+    {
+        DependencyNodeVisitor visitor = getSerializingDependencyNodeVisitor( sink );
+
+        visitor = new BuildingDependencyNodeVisitor( visitor );
+
+        DependencyNodeFilter filter = createDependencyNodeFilter(key);
+
+        if ( filter != null )
+        {
+            CollectingDependencyNodeVisitor collectingVisitor = new CollectingDependencyNodeVisitor();
+            DependencyNodeVisitor firstPassVisitor = new FilteringDependencyNodeVisitor( collectingVisitor, filter );
+            rootNode.accept( firstPassVisitor );
+
+            DependencyNodeFilter secondPassFilter =
+                new AncestorOrSelfDependencyNodeFilter( collectingVisitor.getNodes() );
+            visitor = new FilteringDependencyNodeVisitor( visitor, secondPassFilter );
+        }
+
+        rootNode.accept( visitor );
+    }
+    
+    /**
+     * Gets the dependency node filter to use when serializing the dependency graph.
+     *
+     * @return the dependency node filter, or <code>null</code> if none required
+     */
+    private DependencyNodeFilter createDependencyNodeFilter(String includes)
+    {
+        List<DependencyNodeFilter> filters = new ArrayList<DependencyNodeFilter>();
+
+        // filter includes
+        if ( includes != null )
+        {
+            List<String> patterns = Arrays.asList( includes.split( "," ) );
+
+            getLog().debug( "+ Filtering dependency tree by artifact include patterns: " + patterns );
+
+            ArtifactFilter artifactFilter = new StrictPatternIncludesArtifactFilter( patterns );
+            filters.add( new ArtifactDependencyNodeFilter( artifactFilter ) );
+        }
+
+        return filters.isEmpty() ? null : new AndDependencyNodeFilter( filters );
+    }
+    
+    public DependencyNodeVisitor getSerializingDependencyNodeVisitor( Sink sink )
+    {
+        return new SinkSerializingDependencyNodeVisitor( sink );
     }
 
     /**
@@ -612,22 +722,22 @@ public class DependencyConvergenceReport
     {
         return this.reactorProjects.size() > 1;
     }
-
-    private static void link( Sink sink, String url )
-    {
-        if ( StringUtils.isNotEmpty( url ) )
-        {
-            sink.link( url );
-        }
-    }
-
-    private static void link_( Sink sink, String url )
-    {
-        if ( StringUtils.isNotEmpty( url ) )
-        {
-            sink.link_();
-        }
-    }
+//
+//    private static void link( Sink sink, String url )
+//    {
+//        if ( StringUtils.isNotEmpty( url ) )
+//        {
+//            sink.link( url );
+//        }
+//    }
+//
+//    private static void link_( Sink sink, String url )
+//    {
+//        if ( StringUtils.isNotEmpty( url ) )
+//        {
+//            sink.link_();
+//        }
+//    }
 
     private void iconSuccess( Sink sink )
     {
@@ -679,6 +789,8 @@ public class DependencyConvergenceReport
         for ( MavenProject reactorProject : reactorProjects )
         {
             DependencyNode node = getNode( reactorProject );
+            
+            this.projectMap.put( reactorProject, node );
 
             getConflictingDependencyMap( conflictingDependencyMap, reactorProject, node );
 
@@ -844,73 +956,73 @@ public class DependencyConvergenceReport
         }
     }
 
-    /**
-     * Get full name for a given artifact. {groupId}:{artifactId}:{version}
-     * 
-     * @param artifact
-     * @return full name of a given artifact.
-     */
-    private static String getFullArtifactName( Artifact artifact )
-    {
-        return artifact.getGroupId() + ":" + artifact.getArtifactId() + ":" + artifact.getVersion();
-    }
-
-    /**
-     * Build tree sinks, help user to resolve conflicting issues easily.
-     * 
-     * @param node
-     * @param sink
-     */
-    private static void buildTreeSink( ReverseDependencyLink rdl, Sink sink, boolean isReactorBuild )
-    {
-        DependencyNode node = rdl.getDependencyNode();
-
-        if ( node == null )
-        {
-            return;
-        }
-
-        List<String> loc = new ArrayList<String>();
-        DependencyNode currentNode = node;
-        while ( currentNode != null )
-        {
-            if ( currentNode.getParent() == null )
-            {
-                break;
-            }
-
-            loc.add( getFullArtifactName( currentNode.getArtifact() ) );
-            currentNode = currentNode.getParent();
-        }
-
-        Collections.reverse( loc );
-
-        for ( String locElement : loc )
-        {
-            int j = 0;
-            int idx = loc.indexOf( locElement );
-            while ( j <= idx )
-            {
-                sink.nonBreakingSpace();
-                sink.nonBreakingSpace();
-                sink.nonBreakingSpace();
-                sink.nonBreakingSpace();
-                j++;
-            }
-
-            if ( idx == loc.size() - 1 )
-            {
-                sink.text( "\\-" + locElement );
-            }
-            else
-            {
-                sink.text( "+-" + locElement );
-            }
-
-            sink.lineBreak();
-        }
-
-    }
+//    /**
+//     * Get full name for a given artifact. {groupId}:{artifactId}:{version}
+//     * 
+//     * @param artifact
+//     * @return full name of a given artifact.
+//     */
+//    private static String getFullArtifactName( Artifact artifact )
+//    {
+//        return artifact.getGroupId() + ":" + artifact.getArtifactId() + ":" + artifact.getVersion();
+//    }
+//
+//    /**
+//     * Build tree sinks, help user to resolve conflicting issues easily.
+//     * 
+//     * @param node
+//     * @param sink
+//     */
+//    private static void buildTreeSink( ReverseDependencyLink rdl, Sink sink, boolean isReactorBuild )
+//    {
+//        DependencyNode node = rdl.getDependencyNode();
+//
+//        if ( node == null )
+//        {
+//            return;
+//        }
+//
+//        List<String> loc = new ArrayList<String>();
+//        DependencyNode currentNode = node;
+//        while ( currentNode != null )
+//        {
+//            if ( currentNode.getParent() == null )
+//            {
+//                break;
+//            }
+//
+//            loc.add( getFullArtifactName( currentNode.getArtifact() ) );
+//            currentNode = currentNode.getParent();
+//        }
+//
+//        Collections.reverse( loc );
+//
+//        for ( String locElement : loc )
+//        {
+//            int j = 0;
+//            int idx = loc.indexOf( locElement );
+//            while ( j <= idx )
+//            {
+//                sink.nonBreakingSpace();
+//                sink.nonBreakingSpace();
+//                sink.nonBreakingSpace();
+//                sink.nonBreakingSpace();
+//                j++;
+//            }
+//
+//            if ( idx == loc.size() - 1 )
+//            {
+//                sink.text( "\\-" + locElement );
+//            }
+//            else
+//            {
+//                sink.text( "+-" + locElement );
+//            }
+//
+//            sink.lineBreak();
+//        }
+//
+//    }
 
     /**
      * Get all descendants nodes for a given dependency node.
@@ -980,13 +1092,13 @@ public class DependencyConvergenceReport
     /**
      * Internal ReverseDependencyLink comparator
      */
-    static class ReverseDependencyLinkComparator
-        implements Comparator<ReverseDependencyLink>
+    static class DependencyNodeComparator
+        implements Comparator<DependencyNode>
     {
         /** {@inheritDoc} */
-        public int compare( ReverseDependencyLink p1, ReverseDependencyLink p2 )
+        public int compare( DependencyNode p1, DependencyNode p2 )
         {
-            return p1.getProject().getId().compareTo( p2.getProject().getId() );
+            return p1.getArtifact().getId().compareTo( p2.getArtifact().getId() );
         }
     }
 
