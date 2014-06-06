@@ -699,22 +699,6 @@ public class DependencyConvergenceReport
     {
         return this.reactorProjects.size() > 1;
     }
-//
-//    private static void link( Sink sink, String url )
-//    {
-//        if ( StringUtils.isNotEmpty( url ) )
-//        {
-//            sink.link( url );
-//        }
-//    }
-//
-//    private static void link_( Sink sink, String url )
-//    {
-//        if ( StringUtils.isNotEmpty( url ) )
-//        {
-//            sink.link_();
-//        }
-//    }
 
     private void iconSuccess( Sink sink )
     {
@@ -931,74 +915,6 @@ public class DependencyConvergenceReport
             throw new MavenReportException( "Could not build dependency tree " + e.getLocalizedMessage(), e );
         }
     }
-
-//    /**
-//     * Get full name for a given artifact. {groupId}:{artifactId}:{version}
-//     * 
-//     * @param artifact
-//     * @return full name of a given artifact.
-//     */
-//    private static String getFullArtifactName( Artifact artifact )
-//    {
-//        return artifact.getGroupId() + ":" + artifact.getArtifactId() + ":" + artifact.getVersion();
-//    }
-//
-//    /**
-//     * Build tree sinks, help user to resolve conflicting issues easily.
-//     * 
-//     * @param node
-//     * @param sink
-//     */
-//    private static void buildTreeSink( ReverseDependencyLink rdl, Sink sink, boolean isReactorBuild )
-//    {
-//        DependencyNode node = rdl.getDependencyNode();
-//
-//        if ( node == null )
-//        {
-//            return;
-//        }
-//
-//        List<String> loc = new ArrayList<String>();
-//        DependencyNode currentNode = node;
-//        while ( currentNode != null )
-//        {
-//            if ( currentNode.getParent() == null )
-//            {
-//                break;
-//            }
-//
-//            loc.add( getFullArtifactName( currentNode.getArtifact() ) );
-//            currentNode = currentNode.getParent();
-//        }
-//
-//        Collections.reverse( loc );
-//
-//        for ( String locElement : loc )
-//        {
-//            int j = 0;
-//            int idx = loc.indexOf( locElement );
-//            while ( j <= idx )
-//            {
-//                sink.nonBreakingSpace();
-//                sink.nonBreakingSpace();
-//                sink.nonBreakingSpace();
-//                sink.nonBreakingSpace();
-//                j++;
-//            }
-//
-//            if ( idx == loc.size() - 1 )
-//            {
-//                sink.text( "\\-" + locElement );
-//            }
-//            else
-//            {
-//                sink.text( "+-" + locElement );
-//            }
-//
-//            sink.lineBreak();
-//        }
-//
-//    }
 
     /**
      * Get all descendants nodes for a given dependency node.
